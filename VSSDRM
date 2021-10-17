@@ -1,0 +1,446 @@
+
+Basic R code for Variable Selection in Switching Dynamic Regression Models
+
+###############################################################
+################      (1)  Initial values      ################
+###############################################################
+#truncation level
+K=30                
+
+####transition probabilities matrix
+pi_init=matrix(rep(1/K,K),nr=1,nc=K)
+####modes sequence
+z_initial=rep(0,TT)
+for(i in 1:TT){
+  z_initial[i]=match(1,rmultinom(1,1,prob=rep(1/Kz,Kz)))
+}
+z=z_initial    
+             
+####hyperparameters
+#(\alpha + \kappa)\sim Gam(forma=a_alpha,tasa=b_alpha)  
+a_alpha=1                                     
+b_alpha=0.01
+alpha0_p_kappa0=a_alpha/b_alpha    
+kappa0=10    
+alpha0=alpha0_p_kappa0-kappa0       
+####\rho\simBeta(c_rho,d_rho)
+c_rho=10                            
+d_rho=1
+rho0=kappa0/(alpha0+kappa0)                             
+####\Lambda\simstick(\gamma)
+####\gamma\simGam(forma=a_gamma,tasa=b_gamma)
+a_gamma=1                           
+b_gamma=0.01                        
+gamma0=a_gamma/b_gamma              
+#####\lambda
+lambda_vec=(1/Kz)*matrix(1,nr=1,nc=Kz)
+#####ARD
+#\alpha_j\simGam(a0A,b0A).
+a0A=1                               
+b0A=1/100                        
+alphaA=matrix(rgamma(Kz*p,shape=a0A,rate=b0A),nr=Kz,nc=p)
+####\Sigma
+n0=p+2                            
+S0=diag(p)                        
+#####noise
+shapeR=1                           
+rateR=1/2                          
+####A^{(k)},\Sigma^{(k)}, R^{(k)}
+A=array(diag(p),c(p,p,Kz))
+Sigma=array(0,c(p,p,Kz))
+invSigma=array(0,c(p,p,Kz))
+invR=rep(0,Kz)
+
+for(i in 1:Kz){
+	#A
+	for(j in 1:p){
+	Sigma0_A=solve(diag(alphaA[i,j],p,p))	  
+	A[,j,i]=mvrnorm(1,mu=rep(0,p),Sigma=Sigma0_A)
+	}
+	#Sigma
+	Sigma[,,i]=riwish(v=n0,S=S0)
+	#R
+	invR[i]=rgamma(1,shape=shapeR,rate=rateR)
+}
+#save
+SigmaInitial=Sigma
+AInitial=A
+Rinitial=1/invR
+
+####solve(SigmaA)
+InvSigmaA=array(0,c(p,p,K)) 
+
+
+N=matrix(0,nr=Kz+1,nc=Kz)    #numero de trans del modo j al modo k
+
+#####transition distribution, \pi_z
+pi_z=matrix(0,Kz,Kz)
+for(j in 1:Kz){
+  kappa_vec=matrix(0,nr=1,nc=Kz)
+  kappa_vec[1,j]=kappa0
+  alphaPi=alpha0*lambda_vec+kappa_vec+N[j,]
+  pi_z[j,]=rdirichletG(alphaPi)
+}
+
+########################################################
+
+####indicator variables
+gammaselec=matrix(1,nr=K,nc=p)     
+####state sequence
+beta=matrix(0,nr=TT,nc=p)							    
+
+########################################################
+
+
+####Dirichlet sampler
+rdirichletG=function(a){
+	y=rgamma(length(a),a,1)
+	return(y/sum(y))
+}
+
+###############################################################
+###############              save             #################
+###############################################################
+iterGibbs=20000
+storeAlphaARD=array(0,c(K,p,iterGibbs))
+storeBeta=array(0,c(TT,p,iterGibbs))
+storeA=array(0,c(p,p,K,iterGibbs))
+storeSigma=array(0,c(p,p,K,iterGibbs))
+storeR=matrix(0,nr=iterGibbs,nc=K)
+storeAlpha0=rep(0,iterGibbs)
+storeKappa0=rep(0,iterGibbs)
+storeZ=matrix(0,nr=iterGibbs,nc=TT)
+storeZ1=matrix(0,nr=iterGibbs,nc=TT)
+savemc=matrix(0,nr=iterGibbs,nc=TT)
+storeGamma=array(0,c(K,p,iterGibbs))
+
+###############################################################
+###############    forward-backward objects    ################
+###############################################################
+#define y_0=0
+
+####forward
+Ft_f=array(0,dim=c(p,p,TT+1))
+ft_f=matrix(0,nr=p,nc=TT+1)
+InvFt_f=array(0,dim=c(p,p,TT))
+mt_f=matrix(0,nr=p,nc=TT)InvFt_f
+#initial value
+Ft_f[,,1]=diag(1,p,p)
+
+####backward
+Ft_b=array(0,c(p,p,TT+1))F_bb_m
+ft_b=matrix(0,nr=p,nc=TT+1)
+F_b=array(0,c(p,p,TT+1))
+f_b=matrix(0,nr=p,nc=TT+1)                  
+b_m=matrix(1,nr=K,nc=(TT+1))
+
+####likelihood
+marg=matrix(0,nr=K,nc=(TT+1))
+
+###############################################################
+##########                  update z_t               ##########
+###############################################################
+###########    ***likelihood function***      ##########
+Fwd_likelihood=function(k,ff,FF,TT,X,gamma,invR,A,Sigma,y){
+m=S=rep(0,TT)
+  for(t in 1:TT){	
+    #### y_likelihood
+    Xy=X[-1,][t,]*gamma[k,]
+    #mean
+    m[t]=t(Xy)%*%A[,,k]%*%ff[,t]
+    #var
+    S[t]=t(Xy)%*%(Sigma[,,k]+A[,,k]%*%FF[,,t]%*%t(A[,,k]))%*%Xy+(1/invR[k])
+    
+  }#end for t
+  
+  cholinvY=sqrt(1/S)
+  
+  u=c(cholinvY)*(y[2:(TT+1)]-m)  		
+  u2=-0.5*u^2          
+  
+  log_likelihood=-0.5*u^2+log(cholinvY) 		
+  output=log_likelihood
+  
+  return(output)
+  
+}#end Fwd_likelihood function
+
+
+###############################################################
+########           update \gamma^{(z_t)} z_t           ########
+###############################################################
+########### **** likelihood function **** ###########
+ylikefn=function(FF,ff,X,invR,A,Sigma,gamma,nk,k,y){
+n=length(nk)
+  m=S=rep(0,n)
+  ytemp=y[-1][nk]
+  i=1
+  #for t:z_t=k
+  for(t in nk){
+    #X*gamma
+    Xy=X[-1,][t,]*gamma[k,]
+    #mean
+    m[i]=t(Xy)%*%A[,,k]%*%ff[,t]
+    #var
+    S[i]=t(Xy)%*%(Sigma[,,k]+A[,,k]%*%FF[,,t]%*%t(A[,,k]))%*%Xy+(1/invR[k])
+    i=i+1
+  }#end for t
+  
+  cholinvY=sqrt(1/S)
+  
+  u=c(cholinvY)*(ytemp-m) 		
+  u2=-0.5*u^2          
+  
+  log_likelihood=-0.5*u^2+log(cholinvY)  		
+  output=log_likelihood
+  
+  return(output)
+}
+
+###############################################################
+###################          loop          ####################
+###############################################################
+iter=0
+repeat{
+  iter=iter+1
+
+	#Sigma^-1
+  for(kz in 1:K){
+	invSigma[,,kz]=solve(Sigma[,,kz])	
+	}
+
+###############################################################
+############             (1)   forward            #############
+#########             for each t\in{1,...,T}          #########
+###############################################################
+#define z_0=0
+z=c(0,z)
+
+#forward | z_{1:T}
+for(t in 2:(TT+1)){
+	id=z[t]
+	Xstar=X[t,]*gammaselec[id,]
+  
+  InvFt_f[,,(t-1)]=solve(Ft_f[,,t-1])
+  mt_f[,(t-1)]=InvFt_f[,,(t-1)]%*%ft_f[,t-1]
+  #forward
+  Ft1=solve(A[,,id]%*%InvFt_f[,,(t-1)]%*%t(A[,,id])+Sigma[,,id]) 
+  ft1=Ft1%*%(A[,,id]%*%mt_f[,(t-1)])
+  #update the forward message with the current obs
+  Ft_f[,,t]=Ft1+invR[id]*Xstar%*%t(Xstar)                         
+  ft_f[,t]=ft1+Xstar*invR[id]*y[t]
+}
+###############################################################
+############             (2)  backward              ###########
+#########            for each t\in{T,...,1}           #########
+###############################################################
+#initial values (for t=TT)
+idIni=z[TT+1]
+Xstar=X[TT+1,]*gammaselec[idIni,]
+Ft_b[,,(TT+1)]=invR[idIni]*Xstar%*%t(Xstar)
+ft_b[,(TT+1)]=Xstar*invR[idIni]*y[(TT+1)]
+
+for(t in (TT+1):2){
+	idZ=z[t]
+	iSigma=invSigma[,,idZ]
+
+  	J_t=Ft_b[,,t]%*%solve(Ft_b[,,t]+iSigma)
+  	L_t=diag(1,nr=nrow(J_t),nc=nrow(J_t))-J_t
+  	Sigma_t=L_t%*%Ft_b[,,t]%*%t(L_t)+J_t%*%iSigma%*%t(J_t)
+  	#backward
+  	F_t_tm1=t(A[,,idZ])%*%Sigma_t%*%A[,,idZ] 
+  	f_t_tm1=t(A[,,idZ])%*%L_t%*%(ft_b[,t])
+  	#save
+  	f_b[,,(t-1)]=F_t_tm1
+  	f_b[,(t-1)]=f_t_tm1
+    #update backward
+  if(t==2){
+    Ft_b[,,(t-1)]=F_t_tm1
+    ft_b[,(t-1)]=f_t_tm1
+  }
+  if(t>2){
+  	id=z[(t-1)]
+  	Xstar=X[(t-1),]*gammaselec[id,]
+  	Ft_b[,,(t-1)]=F_t_tm1+invR[id]*Xstar%*%t(Xstar)
+  	ft_b[,(t-1)]=f_t_tm1+Xstar*invR[id]*y[(t-1)]
+  	}
+  	
+  	
+  	#interleave
+  	module=iter%%20
+  	if(module==0){
+  		
+    ####sequential sampling (see Fox et al., 2011) 
+    
+  }#end interleave
+ 
+ } #end for(t in (TT+1):2)
+  
+ #save z_t of sequential sampling
+ storeZ1[iter,]=z[-1]
+ 
+###############################################################
+###             (3) update state vector (\beta)            ####
+#########            for each t\in{1,...,T}           #########
+###############################################################                
+for(kz in 1:K){
+  InvSigmaA[,,kz]=invSigma[,,kz]%*%A[,,kz]
+}
+#sample beta_t (use P0=1 as initial covariance)
+beta=matrix(0,nr=(TT+1),nc=p)
+Sigma_1=solve(Ft_b[,,1]+diag(p))
+#beta_0=0
+mu_1=Sigma_1%*%ft_b[,1]                      
+beta[1,]=mu_1+t(chol(Sigma_1))%*%rnorm(p)
+for(t in 2:(TT+1)){
+  F_tot=invSigma[,,z[t]]+Ft_b[,,t]
+  f_tot=InvSigmaA[,,z[t]]%*%beta[(t-1),]+ft_b[,t]
+  Sigma_t=solve(F_tot)
+  Sigma_t=0.5*(Sigma_t+t(Sigma_t))
+  mu_t=Sigma_t%*%f_tot
+  beta[t,]=mu_t+t(chol(Sigma_t))%*%rnorm(p)
+}
+
+
+###############################################################
+################       (4a) block sampler      #################
+###############################################################
+
+####Update with z_{1:T} 
+
+#likelihood function
+Loglikelihood=matrix(0,nr=K,nc=TT)
+for(k in 1:K){
+	Loglikelihood[k,]=Fwd_likelihood(k,mt_f,InvFt_f,TT,X,gammaselec,invR,A,Sigma,y)
+}#end for k
+	#likelihood
+	normalizer=apply(Loglikelihood,2,max)
+	log_likelihood=Loglikelihood-matrix(rep(normalizer,K),nr=K,nc=TT,byrow=T)           
+	likelihood=exp(log_likelihood) 
+
+for(t in TT:1){
+  marg[,(t+1)]=likelihood[,t]*b_m[,(t+1)]      
+  b_m[,t]=pi_z%*%marg[,(t+1)]
+  b_m[,t]=b_m[,t]/sum(b_m[,t])
+}
+   #marginal for t=1
+   marg[,1]=likelihood[,1]*b_m[,1]
+
+###############################################################
+######             (4b) update modes sequence             #####
+###############################################################
+N=matrix(0,nr=K+1,nc=K)
+z=rep(0,TT)
+#for t==1
+Pz_msg=likelihood[,1]*b_m[,2]
+Pz_block=rmultinom(1,size=1,prob=Pz_msg)
+z[1]=which.max(Pz_block)
+N[(K+1),z[1]]=N[(K+1),z[1]]+1
+#for t>1
+for(t in 2:TT){
+	#sample z_t
+	Pz_msg=pi_z[z[t-1],]*likelihood[,t]*b_m[,(t+1)]
+	Pz_block=rmultinom(1,size=1,prob=Pz_msg)
+    z[t]=which.max(Pz_block)
+    sp=Pz_msg/sum(Pz_msg)
+    mc=sum(sp[-z[t-1]])
+    #save transition probabilities
+    savemc[iter,t]=mc
+	#count matrix
+	N[z[t-1],z[t]]=N[z[t-1],z[t]]+1
+}
+
+###############################################################
+#####     (5) Update \lambda, \pi and hyperparameters     #####
+##### \alpha, \gamma, and \kappa, see Fox et al. (2011b)  #####
+###############################################################
+  
+
+###############################################################
+### (6) Update  parameters A^{(k)}, \Sigma^{(k)} and R^{(k)}###
+######               see Fox et al. (2011)              #######
+###############################################################
+
+
+###############################################################
+###              (7) Update indicator variables             ###
+###############################################################
+#Update forward
+for(t in 2:(TT+1)){
+  #define design matrix
+  	id=z[(t-1)]
+	Xstar=X[t,]*gammaselec[id,]
+  #define special terms for forward filter
+  InvFt_f[,,(t-1)]=solve(Ft_f[,,t-1])
+  mt_f[,(t-1)]=InvFt_f[,,(t-1)]%*%ft_f[,t-1]
+  #propagate the forward message
+  Ft1=solve(A[,,id]%*%InvFt_f[,,(t-1)]%*%t(A[,,id])+Sigma[,,id]) 
+  f_tft1m1_t=Ft1%*%(A[,,id]%*%mt_f[,(t-1)])
+  #update the forward message with the current obs
+  Ft_f[,,t]=Ft1+invR[id]*Xstar%*%t(Xstar)                         
+  ft_f[,t]=ft1+Xstar*invR[id]*y[t]
+}
+
+#objects
+pselec=cselec=dselec=matrix(NA,nr=K,nc=p)
+fillmode=unique(z)
+nfillmode=which(match(1:K,sort(fillmode),nomatch=99)==99)
+
+#modes with information
+for(k in fillmode){
+		rindex=sample(2:p)
+		indexzk=which(z==k)
+
+			for(j in rindex){			
+			#we choose p_j=0.5 for all j to reflect the equally likely likelihood
+			#prior for all possible 2^p submodels
+			
+			#num c_j
+			gammaselec[k,j]=1
+			squares=ylikefn(InvFt_f,mt_f,X,invR,A,Sigma,gammaselec,indexzk,k,y)
+			SumSquares=sum(squares)
+			ctemp=SumSquares
+			
+			#den d_j
+			gammaselec[k,j]=0
+			squares=ylikefn(InvFt_f,mt_f,X,invR,A,Sigma,gammaselec,indexzk,k,y)
+			SumSquares=sum(squares)
+			dtemp=SumSquares
+			
+			#normalizer
+			exp_cd=exp(c(ctemp,dtemp)-max(ctemp,dtemp))
+			cselec[k,j]=0.5*exp_cd[1]
+			dselec[k,j]=(1-0.5)*exp_cd[2]
+        	#probability
+        	pselec[k,j]=cselec[k,j]/(cselec[k,j]+dselec[k,j])   
+        
+        	#index
+			gammaselec[k,j]=rbinom(1,1,pselec[k,j])
+			
+			}#end for j
+			
+	}#end for kz
+
+#modes without information
+for(k in nfillmode){
+			#prob  
+			pselec[k,]=0.5
+			#index
+			gammaselec[k,2:p]=rbinom((p-1),1,pselec[k,])
+	}
+###############################################################
+####################         save          ####################
+###############################################################
+storeAlphaARD[,,iter]=alphaA
+storeA[,,,iter]=A
+storeBeta[,,iter]=beta[2:(TT+1),]
+storeSigma[,,,iter]=Sigma
+storeR[iter,]=1/invR
+storeAlpha0[iter]=alpha0
+storeKappa0[iter]=kappa0
+storeZ[iter,]=z
+storeGamma[,,iter]=gammaselec
+
+if(iter==iterGibbs) break
+
+ }#end iterGibbs
